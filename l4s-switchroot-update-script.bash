@@ -11,17 +11,27 @@ logfile="/var/log/swru-updater.log"
 download_swru_hashes="/var/tmp/download_swru_hashes.txt"
 download_swru_sha1_hashes="/var/tmp/download_swru_sha1_hashes.txt"
 latest_3_update="https://download.switchroot.org/ubuntu/switchroot-ubuntu-3.4.0-update_only-2021-07-23.7z"
-me=
+my_stable="https://raw.githubusercontent.com/zbukhari/swru/main/l4s-switchroot-update-script.bash"
+
 
 if [[ $(id -u) != 0 ]]; then
 	echo -e "This script needs to be run as root."
 	exit 1
 fi
 
-_exit () {
-	echo $*
-	exit 2
-}
+# First lets see if we need to update the script.
+temp_file=$(mktemp /tmp/l4s-switchroot-update-script.bash.XXXXXX)
+wget -qO - "$my_stable" > "$temp_file"
+remote_md5=$(md5sum "$temp_file" | awk '{print $1}')
+my_md5=$(md5sum $0 | awk '{print $1}')
+
+if [ "x$my_md5" != "x$remote_md5" ]; then
+	echo Need to update this script. Please run $0 again afterwards.
+	cat "$temp_file" | tee "$0" && exit 0
+fi
+
+echo I am in chump testing mode right now
+exit 0
 
 # Unceremoniously ripped from init for nefarious purposes - jk - very
 # farious purposes. Tron - fight for the user!
