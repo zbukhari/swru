@@ -7,31 +7,64 @@ set -e
 # it's own checks and balances kinda like retropie.
 PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
+### Variables ###
+# Files
 logfile="/var/log/swru-updater.log"
-download_swru_hashes="/var/tmp/download_swru_hashes.txt"
-download_swru_sha1_hashes="/var/tmp/download_swru_sha1_hashes.txt"
-latest_3_update="https://download.switchroot.org/ubuntu/switchroot-ubuntu-3.4.0-update_only-2021-07-23.7z"
+swru_hashes="/var/tmp/latest_swru_hashes.txt"
+
+# URL's
+baseurl="https://download.switchroot.org/ubuntu"
+swru_hashes_url="https://download.switchroot.org/ubuntu/hashes.txt"
+# swru_latest_update="https://download.switchroot.org/ubuntu/switchroot-ubuntu-3.4.0-update_only-2021-07-23.7z"
 my_stable="https://raw.githubusercontent.com/zbukhari/swru/main/l4s-switchroot-update-script.bash"
 
+# Helpful / quality of life
+swru_version="$(< /etc/switchroot_version.conf)"
+swru_major_version="$(cat /etc/switchroot_version.conf | cut -f1 -d.)"
+swru_minor_version="$(cat /etc/switchroot_version.conf | cut -f2 -d.)"
+swru_patch_version="$(cat /etc/switchroot_version.conf | cut -f3 -d.)"
 
 if [[ $(id -u) != 0 ]]; then
 	echo -e "This script needs to be run as root."
 	exit 1
 fi
 
-# First lets see if we need to update the script.
-temp_file=$(mktemp /tmp/l4s-switchroot-update-script.bash.XXXXXX)
-wget -qO - "$my_stable" > "$temp_file"
-remote_md5=$(md5sum "$temp_file" | awk '{print $1}')
-my_md5=$(md5sum $0 | awk '{print $1}')
+### Functions ###
+self_update_script () {
+	# First lets see if we need to update the script.
+	temp_file=$(mktemp /tmp/l4s-switchroot-update-script.bash.XXXXXX)
+	wget -qO - "$my_stable" > "$temp_file"
+	remote_md5=$(md5sum "$temp_file" | awk '{print $1}')
+	my_md5=$(md5sum $0 | awk '{print $1}')
 
-if [ "x$my_md5" != "x$remote_md5" ]; then
-	echo Need to update this script. Please run $0 again afterwards.
-	cat "$temp_file" | tee "$0" && exit 0
-fi
+	if [ "x$my_md5" != "x$remote_md5" ]; then
+		echo Need to update this script. Please run $0 again afterwards.
+	
+		# In order to get this squared away in one shot we need to pass one
+		# command so we chain
+		cat "$temp_file" > "$0" && rm "$temp_file" && exit 0
+	else
+		rm "$temp_file"
+	fi
+}
 
-echo I am in chump testing mode right now
-exit 0
+update_swru_hashes () {
+	echo Updating Switchroot Ubuntu hashes
+
+	tmpfile=$(mktemp "/tmp/swru_hashes.txt-XXXXXX")
+	wget -qO "$tmpfile" "$swru_hashes_url"
+	if [ $? -eq 0 ]; then
+		echo Got updated hashes, updating file.
+		# Can probably be removed easily later.
+		cat "$tmpfile" | grep -v '^root@switchroot' | sed 's# \./# #g' > "$download_swru_sha1_hashes"
+		rm "$tmpfile"
+	elif [ -f "$download_swru_sha1_hashes" ]; then
+		echo Could not get file, using existing file.
+	else
+		echo Unable to get Switchroot Ubuntu hashes. Exiting.
+		exit 2
+	fi
+}
 
 # Unceremoniously ripped from init for nefarious purposes - jk - very
 # farious purposes. Tron - fight for the user!
@@ -85,7 +118,7 @@ find_boot_path () {
 	fi
 }
 
-are_apt_updates () {
+check_apt_updates () {
 	echo Updating package cache.
 	apt-get update
 
@@ -105,38 +138,73 @@ apt_upgrader () {
 		dist-upgrade
 }
 
+# From what the web docs say, any 3.y.z can be upgraded to the latest by
+# just unpacking the latest hoping the trend continues.
+#
+# Pulling in code from "init" to find "boot" aka the FAT with switchroot.
+#
+# Self notes: initramfs does the unpacking of modules/updates tar.gz.
+# init is the shell script with the magic.
+#
+# Going to hold off on verify as it would require more TLC but for memory
+#
+# tar df update.tar.gz -C /
+# tar df modules.tar.gz -C /lib
+# 
+# We'll let the normal process and "init" take point.
 swru_upgrader () {
-	# From what the web docs say, any 3.y.z can be upgraded to the latest by
-	# just unpacking the latest hoping the trend continues.
-	#
-	# Pulling in code from "init" to find "boot" aka the FAT with switchroot.
-	#
-	# Self notes: initramfs does the unpacking of modules/updates tar.gz.
-	# init is the shell script with the magic.
-	#
-	# Going to hold off on verify as it would require more TLC but in case
-	# tar df update.tar.gz -C /
-	# tar df modules.tar.gz -C /lib
-	# 
-	# It seems that the preview 3.4.2 I have doesn't alter the
-	# switchroot_version.conf to 3.4.2
+	major_version=$(echo "$1" | cut -f1 -d.)
+	minor_version=$(echo "$1" | cut -f2 -d.)
+	patch_version=$(echo "$1" | cut -f3 -d.)
 
 	if [ "x$boot_dev_found" != "xtrue" ]; then
-		cat <<-HEREDOC
-			You will want to update your Switchroot Ubuntu installation as prescribed
-			by the documents here:
 
-			https://wiki.switchroot.org/en/Linux/Ubuntu-Install-Guide#updates-for-previous-30-installs
-
-		HEREDOC
-
-		return
+		exit 1
 	fi
 
-	case "$1" in
-		# Special ... case - bwahahahahaha - get it? Cuz it's the preview
-		# one right now and in a switch-case ... meh.
+	case "$swru_major_version" in
+		# For long term care - we'd want to manually update this for 4.
 		3)
+			latest_update_file="$(basename $(cat $swru_hashes_file | fgrep update_only | awk '{print $2}'))"
+			# Considering the names used in the past, safe bet.
+			latest_update_version="$(echo $latest_update_file | cut -f3 -d-)"
+
+			# Just in case someone's living in the past... we just return.
+			latest_update_major_version=$(echo $latest_update_version | cut -f1 -d.)
+			latest_update_minor_version=$(echo $latest_update_version | cut -f2 -d.)
+			latest_update_patch_version=$(echo $latest_update_version | cut -f3 -d.)
+
+			if [ "x$latest_update_major_version" != "x$swru_major_version" ]; then
+				echo The major Switchroot Ubuntu version does not match.
+				return
+			fi
+
+			# We could go hard in maj.min.patch but for now ... simple string compare.
+			if [ "x$swru_version" = "x$latest_update_version" ]; then
+				echo "Latest version (i.e. ${swru_version}) installed. Yay you!"
+			else
+				echo Updating to latest version.
+				wget -qO "/dev/shm/${latest_update_file}" "${baseurl}/${latest_update_file}"
+				if [ "x$boot_dev_found" = "xtrue" ]; then
+					cd "$boot_path"
+					test -d l4t-ubuntu && rm -fr l4t-ubuntu
+					test -f bootloader/ini/01-ubuntu.ini && rm -f bootloader/ini/01-ubuntu.ini
+					7z x "/dev/shm/${latest_update_file}"
+					shutdown -r +1 Update files staged. Rebooting in one minute.
+					exit 0
+				else
+					cat <<-HEREDOC
+						You will want to update your Switchroot Ubuntu installation as prescribed
+						by the documents here before proceeding:
+
+						https://wiki.switchroot.org/en/Linux/Ubuntu-Install-Guide#updates-for-previous-30-installs
+
+						Exiting now.
+					HEREDOC
+					exit 1
+				fi
+			fi
+
 			update_url="$latest_3_update"
 			filename=$(basename "$latest_3_update")
 			7z x "$latest_3_update" 
@@ -149,7 +217,7 @@ swru_upgrader () {
 
 	cd /root
 
-	wget -qO - "$update_url" > "/dev/shm/$filename"
+	wget -qO "/dev/shm/${filename}" "$update_url"
 
 	7z x "/dev/shm/${filename}"
 
@@ -167,31 +235,20 @@ swru_upgrader () {
 }
 
 # Might want to preserve stdout/stderr.
-# Prepending all output with ISO-8601 accurate to seconds for logging.
+# Prepending all output with ISO-8601 accurate to nanseconds for logging.
 # I could use ts from moreutils but trying to keep this within the realm
 # of basic commands.
-# User will just see the normal stuff.
-exec > >(tee -a >(sed "s/^/$(date +'%Y-%m-%dT%H:%M:%S%z') /g" >> "$logfile")) 2>&1
+#
+# User will just see the normal output.
+exec > >(tee -a >(sed "s/^/$(date --iso-8601=ns) /g" >> "$logfile")) 2>&1
 
-# We're reliant on a network connection to the outside world but we're
-# also using "-e".
+# Do I need to update me?
+self_update_script
 
-# Update hashes because plan is to make this automated AF just more i
-# dotting and t crossing on our part.
-tmpfile=$(mktemp "/tmp/sha1_hashes.XXXXXX")
-echo Getting Switchroot Ubuntu SHA-1 hashes
-wget -qO - https://download.switchroot.org/ubuntu/hashes.txt > "$tmpfile"
-if [ $? -eq 0 ]; then
-	echo Got updated hashes, updating file.
-	# Can probably be removed easily later.
-	cat "$tmpfile" | grep -v '^root@switchroot' | sed 's# \./# #g' > "$download_swru_sha1_hashes"
-	rm "$tmpfile"
-elif [ -f "$download_swru_sha1_hashes" ]; then
-	echo Could not get file, using existing file.
-else
-	echo Unable to get Switchroot Ubuntu hashes. Exiting.
-	exit 2
-fi
+# Lets update 
+
+echo I am in chump testing mode right now
+exit 0
 
 ### azkali says -
 # Oh another last note. We pin nvidia-l4t- packages for a reason (32.3.1 provides the best support) so that should be kept that way 🙂
@@ -259,14 +316,13 @@ do
 	apt_upgrader
 done
 
-# Fresh installations require upgrade to be run 3 times in order to not have held back packages
-# apt-get update -y && apt-get upgrade -y
-# apt-get remove -y && apt-get autoremove -y
-# apt-get update -y && apt-get upgrade -y
-# apt-get update -y && apt-get upgrade -y
-
 # do-release-upgrade
-# No touchy!
+# No touchy ... hopefully!
+if [ ! -f /etc/apt/apt.conf.d/local ]; then
+	cat <<-HEREDOC > /etc/apt/apt.conf.d/local
+		DPkg::options { "--force-confdef"; "--force-confold"; }
+	HEREDOC
+fi
 do-release-upgrade -f DistUpgradeViewNonInteractive
 
 # Temporarily use testing repo
@@ -288,7 +344,11 @@ cp /etc/gdm3/custom.conf.bak /etc/gdm3/custom.conf
 
 echo -e "Fixing upower"
 mkdir -p /etc/systemd/system/upower.service.d/
-echo -e '[Service]\nPrivateUsers=no\nRestrictNamespaces=no' > /etc/systemd/system/upower.service.d/override.conf
+cat <<HEREDOC > /etc/systemd/system/upower.service.d/override.conf
+[Service]
+PrivateUsers=no
+RestrictNamespaces=no
+HEREDOC
 systemctl daemon-reload && systemctl restart upower
 
 echo -e "Disabling upgrade prompt"
