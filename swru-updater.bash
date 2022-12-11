@@ -82,7 +82,7 @@ update_swru_hashes () {
 		for sum in $(egrep '^[0-9a-f]{40}  ' "$tmpfile" | awk '{print $1}')
 		do
 			filename="$(basename $(fgrep $sum $tmpfile | cut -f3- -d' '))"
-			echo "${sum}  ${basename}" >> "$tmpfile2"
+			echo "${sum}  ${filename}" >> "$tmpfile2"
 		done
 
 		cat "$tmpfile2" > "$swru_hashes_file"
