@@ -195,128 +195,52 @@ update_apt () {
 update_swru () {
 	# Since working with a 3.4.2 Preview ...
 	if [ "x$swru_version" = "x3.4.2" ]; then
-		echo Latest found.
+		echo Latest Switchroot version found.
 		return
 	fi
-	update_version=$(fgrep update_only $swru_hashes_file | awk '{print $2}' | cut -f3 -d-)
 
-	update_major_version=$(echo $update_version | cut -f1 -d.)
-	update_minor_version=$(echo $update_version | cut -f2 -d.)
-	update_patch_version=$(echo $update_version | cut -f3 -d.)
+	swru_update_version=$(fgrep update_only $swru_hashes_file | awk '{print $2}' | cut -f3 -d-)
 
-	# First easily see if we're at the same major version
-	if [ "x$swru_major_version" = "x$update_version" ]; then
-		echo Major versions match. Checking whole version.
-		if [ "x$update_version" != "x$swru_version" ]; then
-			if [ "x$boot_dev_found" = "xtrue" ]; then
-				echo Updating to latest version.
-				update_file="$(fgrep update_only $swru_hashes_file | awk '{print $2}')"
-				wget -qO "/dev/shm/${update_file}" "${baseurl}/${update_file}"
-				cd "$boot_path"
-				test -d l4t-ubuntu && rm -fr l4t-ubuntu
-				test -f bootloader/ini/01-ubuntu.ini && rm -f bootloader/ini/01-ubuntu.ini
-				7z x "/dev/shm/${latest_update_file}"
-				shutdown -r +1 "Switchroot update files staged. Rebooting in one minute."
-				exit 0
-			else
-				cat <<-HEREDOC
-					Unable to determine boot partition. Please update manually by following the
-					wiki.
-
-					https://wiki.switchroot.org/en/Linux/Ubuntu-Install-Guide
-				HEREDOC
-				exit 1
-			fi
-		else
-			echo You are at the latest Switchroot version.
-			return
-		fi
-	# We do not have the same major SWRU version
-	else
-		# I am going to leave this here, technically we're at the same kernel version
-		# the updates mostly work with kernel stuff and so we update the swru version
-		# so it is not a big deal but there may come a time where we find a later
-		# kernel version is present and matters. This is for that moment - hopefully
-		# we'll have updated documentation :-D
-		cat <<-HEREDOC
-			Major version mismatch. Local: $swru_version, Remote: $update_version
-
-			This may be expected from one major Ubuntu release to the next and or may
-			require manual updating.
-
-			If in doubt check the Wiki for more information and or feel free to hit
-			CTRL + C at this point. You can always run this script again later.
-
-			https://wiki.switchroot.org/en/Linux/Ubuntu-Install-Guide
-
-			You will have 10 seconds to hit CTRL + C.
-		HEREDOC
-
-		i=10
-		while [ $i -gt 0 ];
-		do
-			# Maybe I can do a joycon trap also - hmmm
-			echo -n "${i} - Hit CTRL + C if you want to stop script execution."
-			sleep 1
-			i=$((i-1))
-		done
+	if [ "x$swru_version" = "x$swru_update_version" ]; then
+		echo Latest Switchroot version found.
+		return
 	fi
 
-	### We could also just update this as a switch case for major, minor, and patch and point to
-	#   URL's all over the place for sustainability / sensibility but I digress.
-	# case "$swru_major_version" in
-	# 	# For long term care - we'd want to manually update this for 4.
-	# 	3)
-	# 		latest_update_file="$(basename $(cat $swru_hashes_file | fgrep update_only | awk '{print $2}'))"
-	# 		# Considering the names used in the past, safe bet.
-	# 		latest_update_version="$(echo $latest_update_file | cut -f3 -d-)"
+	swru_update_major_version=$(echo $swru_update_version | cut -f1 -d.)
+	swru_update_minor_version=$(echo $swru_update_version | cut -f2 -d.)
+	swru_update_patch_version=$(echo $swru_update_version | cut -f3 -d.)
 
-	# 		# Just in case someone's living in the past... we just return.
-	# 		latest_update_major_version=$(echo $latest_update_version | cut -f1 -d.)
-	# 		latest_update_minor_version=$(echo $latest_update_version | cut -f2 -d.)
-	# 		latest_update_patch_version=$(echo $latest_update_version | cut -f3 -d.)
+	if [ "x$swru_major_version" != "x$swru_update_major_version" ]; then
+		cat <<-HEREDOC
+			Major version mismatch. Local: $swru_version, Remote: $swru_update_version
 
-	# 		if [ "x$latest_update_major_version" != "x$swru_major_version" ]; then
-	# 			echo The major Switchroot Ubuntu version does not match.
-	# 			return
-	# 		fi
+			This may require manual intervention. Cowardly exiting. Check the docs.
 
-	# 		# We could go hard in maj.min.patch but for now ... simple string compare.
-	# 		if [ "x$swru_version" = "x$latest_update_version" ]; then
-	# 			echo "Latest version (i.e. ${swru_version}) installed. Yay you!"
-	# 		else
-	# 			echo Updating to latest version.
-	# 			wget -qO "/dev/shm/${latest_update_file}" "${baseurl}/${latest_update_file}"
-	# 			if [ "x$boot_dev_found" = "xtrue" ]; then
-	# 				cd "$boot_path"
-	# 				test -d l4t-ubuntu && rm -fr l4t-ubuntu
-	# 				test -f bootloader/ini/01-ubuntu.ini && rm -f bootloader/ini/01-ubuntu.ini
-	# 				7z x "/dev/shm/${latest_update_file}"
-	# 				shutdown -r +1 Update files staged. Rebooting in one minute.
-	# 				exit 0
-	# 			else
+			https://wiki.switchroot.org/en/Linux/Ubuntu-Install-Guide
+		HEREDOC
 
-	# 				cat <<-HEREDOC
-	# 					You will want to update your Switchroot Ubuntu installation as prescribed
-	# 					by the documents here before proceeding:
+		exit 1
+	fi
 
-	# 					https://wiki.switchroot.org/en/Linux/Ubuntu-Install-Guide#updates-for-previous-30-installs
+	if [ "x$boot_dev_found" = "xtrue" ]; then
+		echo Updating to latest version.
+		swru_update_file="$(fgrep update_only $swru_hashes_file | awk '{print $2}')"
+		wget -qO "/dev/shm/${swru_update_file}" "${baseurl}/${swru_update_file}"
+		cd "$boot_path"
+		test -d l4t-ubuntu && rm -fr l4t-ubuntu
+		test -f bootloader/ini/01-ubuntu.ini && rm -f bootloader/ini/01-ubuntu.ini
+		7z x "/dev/shm/${swru_update_file}"
+		shutdown -r +1 "Switchroot update files staged. Rebooting in one minute."
+		exit 0
+	else
+		cat <<-HEREDOC
+			Unable to determine boot partition. Please update manually by following the
+			wiki.
 
-	# 					Exiting now.
-	# 				HEREDOC
-	# 				exit 1
-	# 			fi
-	# 		fi
-
-	# 		update_url="$latest_3_update"
-	# 		filename=$(basename "$latest_3_update")
-	# 		7z x "$latest_3_update"
-	# 		;;
-	# 	*)
-	# 		echo Unsupported update version as of now. Exiting. >&2
-	# 		exit 2
-	# 		;;
-	# esac
+			https://wiki.switchroot.org/en/Linux/Ubuntu-Install-Guide
+		HEREDOC
+		exit 1
+	fi
 }
 
 # Log everything
@@ -326,6 +250,8 @@ exec > >(tee -a >(sed "s/^/$(date --iso-8601=ns) /g" >> "$logfile")) 2>&1
 update_self
 update_swru_hashes
 update_apt
+
+exit 0
 update_swru
 
 update_release
