@@ -243,16 +243,30 @@ update_swru () {
 	fi
 }
 
+# New territory for me
+logger_cleanup () {
+	exec 1>&3 3>&-	# Restore stdout and close fd 3
+	exec 2>&4 4>&-	# Restore stderr and close fd 4
+}
+
 # Log everything
-exec > >(tee -a >(sed "s/^/$(date --iso-8601=ns) /g" >> "$logfile")) 2>&1
+exec 3>&1 4>&2		# Store stdout and stderr to fd 3 and 4 respectively.
+trap 'logger_cleanup' EXIT HUP INT QUIT TERM
+
+# I would like to use ts from moreutils but perl is basic and there.
+if [ -x /usr/bin/ts ]; then
+	exec > >(tee >(ts '%FT%T%z' >> "$logfile")) 2>&1
+else
+	exec > >(tee >(perl -pe 'use POSIX strftime; print strftime "%FT%T%z ", localtime' >> "$logfile")) 2>&1
+fi
 
 # Time to roll up ye olde sleeves and put some mustard on it!
 update_self
 update_swru_hashes
 update_apt
+update_swru
 
 exit 0
-update_swru
 
 update_release
 # 1. Check for updates *to* this script. update_self
@@ -262,8 +276,6 @@ update_release
 # 5. If we get here we do a release upgrade. update_release
 
 # Lets do the release update
-echo I am in chump testing mode right now
-exit 0
 
 ### azkali says -
 # Oh another last note. We pin nvidia-l4t- packages for a reason (32.3.1 provides the best support) so that should be kept that way 🙂
