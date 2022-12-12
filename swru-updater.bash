@@ -53,13 +53,16 @@ update_self () {
 	my_md5=$(md5sum $0 | awk '{print $1}')
 
 	if [ "x$my_md5" != "x$remote_md5" ]; then
-		echo Need to update this script. Please run $0 again afterwards.
+		echo There is a newer version of swru-updater available.
 	
 		# In order to get this squared away in one shot we need to pass one
 		# command so we chain.
-		cat "$tmpfile" > "$0" && rm "$tmpfile" && exit 0
+		cat "$tmpfile" > "$0" && \
+			rm "$tmpfile" && \
+			echo "swru-updater has been updated. Please re-run this script." && \
+			exit 0
 	else
-		echo Script is already the latest.
+		echo swru-updater is already the latest.
 	fi
 
 	rm "$tmpfile"
