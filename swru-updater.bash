@@ -36,14 +36,16 @@ swru_major_version="$(echo $swru_version | cut -f1 -d.)"
 swru_minor_version="$(echo $swru_version | cut -f2 -d.)"
 swru_patch_version="$(echo $swru_version | cut -f3 -d.)"
 
-if [[ $(id -u) != 0 ]]; then
-	echo -e "This script needs to be run as root."
-	exit 1
-fi
+# Limits and things
+update_apt_limit=5	# The number of times to try to update all apt packages
+
 
 ### Functions ###
+logger_cleanup () {
+	exec 1>&3 3>&-	# Restore stdout and close fd 3
+	exec 2>&4 4>&-	# Restore stderr and close fd 4
+}
 
-# Works.
 update_self () {
 	tmpfile=$(mktemp /tmp/swru-updater.bash.XXXXXX)
 
@@ -157,16 +159,19 @@ update_apt () {
 	i=1
 	while true
 	do
-		echo update_apt iteration $i
-
 		upgradeable_pkgs=$(apt list --upgradeable 2>/dev/null | wc -l)
 		if [ $upgradeable_pkgs -gt 1 ]; then
+			echo Starting update_apt iteration $i
+
 			echo There are packages which can be upgraded. Will upgrade them.
+			sleep 5
 
 			apt-get -y \
 				-o Dpkg::Options::="--force-confdef" \
 				-o Dpkg::Options::="--force-confold" \
 				dist-upgrade
+
+			echo Finishing update_apt iteration $i
 
 			if [ -f /var/run/reboot-required ]; then
 				shutdown -r +1 "APT update requires reboot. Rebooting in one minute. Run this command after reboot."
@@ -246,14 +251,111 @@ update_swru () {
 	fi
 }
 
-# New territory for me
-logger_cleanup () {
-	exec 1>&3 3>&-	# Restore stdout and close fd 3
-	exec 2>&4 4>&-	# Restore stderr and close fd 4
+# Basic do-release-upgrader. Personally I've run into issues where 3rd party
+# repos need some TLC. It either gets disabled or the "sed" wrecks them. We
+# do have switchroot but that's unstable - let's see how it goes/blows.
+dru () {
+	# Using version numbers for a calmer future.
+	release_version=$(lsb_release -s -r)
+	echo -e "Enabling release upgrade"
+	sed -i 's/Prompt=never/Prompt=lts/g' /etc/update-manager/release-upgrades || true
+
+	# We want to use confold and confdef to prevent prompts.
+	tmpfile=$(mktemp /etc/apt/apt.conf.d/zzzXXXXXX)
+	cat <<-HEREDOC > "$tmpfile"
+		Dpkg::Options { "--force-confdef"; "--force-confold"; }
+	HEREDOC
+	do-release-upgrade -f DistUpgradeViewNonInteractive
+	rm "$tmpfile"
+
+	# Doing a simple check here. We can put in extra checks as we discover
+	# work that may need to be done.
+	post_upgrade_release_version=$(lsb_release -s -r)
+
+	if [ "x$post_upgrade_release_version" = "x$(echo $release_version + 2 | bc -l)" ]; then
+		echo Upgrade has succeeded.
+		echo -e "Disabling upgrade prompt"
+		sed -i 's/Prompt=lts/Prompt=never/g' /etc/update-manager/release-upgrades
+
+		return 0
+	else
+		echo Upgrade has failed.
+		return 1
+	fi
 }
+
+# Distro specific post upgrade stuff.
+update_2_focal () {
+	# Temporarily use testing repo
+	wget -qO - https://jetson.repo.azka.li/ubuntu/pubkey | apt-key add -
+	add-apt-repository 'deb https://jetson.repo.azka.li/ubuntu focal main'
+
+	# I'm not 100% sure what the intention was here. reinstall requires
+	# install but then some of the packages in the second line were/are
+	# already installed. I'm just going to right the reinstall install
+	# bit and hope for the best. Perhaps a confold confdef would be in
+	# good order here.
+	apt-get -y --reinstall install appstream libappstream*
+	apt-get -y install unity-lens-applications unity-lens-files libblockdev-mdraid2 switch-alsa-ucm2
+
+	# We could just call update_apt but if we find there are updates
+	# people can just run this script here again.
+	#apt-get -o Dpkg::Options::="--force-overwrite" -y dist-upgrade
+	#apt-get -f -y -o Dpkg::Options::="--force-overwrite" install
+
+	# echo -e "Restoring gdm3 config"
+	# cp /etc/gdm3/custom.conf.bak /etc/gdm3/custom.conf
+
+	# Restore old Xorg conf
+	#cp /etc/X11/xorg.conf.dist-upgrade-* /etc/X11/xorg.conf
+	#rm /etc/X11/xorg.conf.dist-upgrade-*
+
+	echo -e "Fixing upower"
+	mkdir -p /etc/systemd/system/upower.service.d/
+	cat <<-HEREDOC > /etc/systemd/system/upower.service.d/override.conf
+		[Service]
+		PrivateUsers=no
+		RestrictNamespaces=no
+	HEREDOC
+
+	systemctl daemon-reload && systemctl restart upower
+}
+
+update_release () {
+	# I'll run with this, bc is installed here already, better for long term
+	codename=$(lsb_release -s -c)
+
+	### Omitting - this file is a conf file, should not be overwritten
+	#   if it has modifications which it does.
+	# echo -e "Backing up gdm3 config"
+	# cp /etc/gdm3/custom.conf /etc/gdm3/custom.conf.bak
+
+	case $release_version in
+		bionic)
+			dru && update_2_focal
+			;;
+		*)
+			echo We are not ready to perform a release upgrade this yet.
+			sleep 10
+			return
+			;;
+	esac
+
+	if [ -f /var/run/reboot-required ]; then
+		shutdown -r +1 "Release upgrade requires reboot. Rebooting in one minute."
+	fi
+}
+
+### Let's get ready to rumble! ###
+if [[ $(id -u) != 0 ]]; then
+	echo -e "This script needs to be run as root."
+	exit 1
+fi
+
 
 # Log everything
 exec 3>&1 4>&2		# Store stdout and stderr to fd 3 and 4 respectively.
+# Pretty sure we only need EXIT QUIT TERM but I'm here for it.
 trap 'logger_cleanup' EXIT HUP INT QUIT TERM
 
 # I would like to use ts from moreutils but perl is basic and there.
@@ -263,22 +365,18 @@ else
 	exec > >(tee >(perl -pe 'use POSIX strftime; print strftime "%FT%T%z ", localtime' >> "$logfile")) 2>&1
 fi
 
-# Time to roll up ye olde sleeves and put some mustard on it!
-update_self
-update_swru_hashes
-update_apt
-update_swru
+### Time to roll up ye olde sleeves and put some mustard on it!
 
-exit 0
-
-update_release
 # 1. Check for updates *to* this script. update_self
+update_self
 # 2. Get new hashes file or use existing in /var/tmp. update_swru_hashes
+update_swru_hashes
 # 3. Check if there are any apt updates and perform them. update_apt
+update_apt
 # 4. Check if there are any swru updates and perform them. update_swru
+update_swru
 # 5. If we get here we do a release upgrade. update_release
-
-# Lets do the release update
+update_release
 
 ### azkali says -
 # Oh another last note. We pin nvidia-l4t- packages for a reason (32.3.1 provides the best support) so that should be kept that way 🙂
@@ -294,89 +392,3 @@ update_release
 #Z# - hdmi auto change sound output
 #Z# - jack switching audio works
 #Z# - mic works
-
-# If there's any possible updates, do them. do-release-upgrade requires it
-# anyway and CTCaer also wanted me to have my stuff in place. I may want
-# to have a bit of a cron "state" in place to make it even more automated.
-# For now I'm just going to do it and then someone can just run it again.
-
-# May want to add a check in case there's ever an LTS that isn't easy to
-# upgrade.
-release=$(lsb_release -s -r)
-
-# From docs in downlaods we only need to install the latest. jkjjj
-# the future so going to see if we're at the right version for this, we
-# can have includes or something for x.y.z to a.b.c or whatever.
-case "$(< /etc/switchroot_version.conf)" in
-	3.[0123].0)
-		#Z# Find out if people can boot with FAT and a bootloader.
-		# This we can automate to be complex or not. Holding off.
-		echo Need to upgrade this to 3.4.0.
-		swru_upgrader 3
-		;;
-	3.4.0)
-		# As the update to preview 342 doesn't update the conf I
-		# may temporarily just use the checksum of the extracted
-		# files.
-		swru_upgrader 3.4.2
-		echo Good to upgrade.
-		;;
-	*)
-		echo You are running a magical version.
-		exit 1
-		;;
-esac
-
-echo -e "Backing up gdm3 config"
-cp /etc/gdm3/custom.conf /etc/gdm3/custom.conf.bak
-
-#Z# Just mentioning this but we can also own the endpoint that is checked. I
-#Z# do local mirrors via aptly at my job so more or less manage
-#Z# /etc/update-manager/meta-release and the URI endpoints to point to our
-#Z# own "metadata" files. This way no touchy until we're ready to support the
-#Z# "future". But I digress - not sure how long we're going to keep this
-#Z# train going but I'd like to think forever.
-echo -e "Enabling release upgrade"
-sed -i 's/Prompt=never/Prompt=lts/g' /etc/update-manager/release-upgrades || true
-
-echo -e "Performing upgrade"
-# I got by with one but I did do a dist-upgrade. Will bear this in mind.
-while true
-do
-	apt_upgrader
-done
-
-# do-release-upgrade
-# No touchy ... hopefully!
-do-release-upgrade -f DistUpgradeViewNonInteractive
-
-# Temporarily use testing repo
-wget -qO - https://jetson.repo.azka.li/ubuntu/pubkey | apt-key add -
-add-apt-repository 'deb https://jetson.repo.azka.li/ubuntu focal main'
-
-apt-get -y reinstall appstream libappstream*
-apt-get -y install unity-lens-applications unity-lens-files libblockdev-mdraid2 switch-alsa-ucm2
-
-#apt-get -o Dpkg::Options::="--force-overwrite" -y dist-upgrade
-#apt-get -f -y -o Dpkg::Options::="--force-overwrite" install
-
-echo -e "Restoring gdm3 config"
-cp /etc/gdm3/custom.conf.bak /etc/gdm3/custom.conf
-
-# Restore old Xorg conf
-#cp /etc/X11/xorg.conf.dist-upgrade-* /etc/X11/xorg.conf
-#rm /etc/X11/xorg.conf.dist-upgrade-*
-
-echo -e "Fixing upower"
-mkdir -p /etc/systemd/system/upower.service.d/
-cat <<HEREDOC > /etc/systemd/system/upower.service.d/override.conf
-[Service]
-PrivateUsers=no
-RestrictNamespaces=no
-HEREDOC
-systemctl daemon-reload && systemctl restart upower
-
-echo -e "Disabling upgrade prompt"
-sed -i 's/Prompt=lts/Prompt=never/g' /etc/update-manager/release-upgrades
-
-echo -e "\nDone upgrading !"
