@@ -321,7 +321,6 @@ update_2_focal () {
 }
 
 update_release () {
-	# I'll run with this, bc is installed here already, better for long term
 	codename=$(lsb_release -s -c)
 
 	### Omitting - this file is a conf file, should not be overwritten
@@ -329,12 +328,12 @@ update_release () {
 	# echo -e "Backing up gdm3 config"
 	# cp /etc/gdm3/custom.conf /etc/gdm3/custom.conf.bak
 
-	case $release_version in
+	case $codename in
 		bionic)
 			dru && update_2_focal
 			;;
 		*)
-			echo We are not ready to perform a release upgrade this yet.
+			echo We are not ready to perform a release upgrade from $codename
 			sleep 10
 			return
 			;;
