@@ -39,7 +39,6 @@ swru_patch_version="$(echo $swru_version | cut -f3 -d.)"
 # Limits and things
 update_apt_limit=5	# The number of times to try to update all apt packages
 
-
 ### Functions ###
 logger_cleanup () {
 	exec 1>&3 3>&-	# Restore stdout and close fd 3
@@ -351,7 +350,6 @@ if [[ $(id -u) != 0 ]]; then
 	echo -e "This script needs to be run as root."
 	exit 1
 fi
-
 
 # Log everything
 exec 3>&1 4>&2		# Store stdout and stderr to fd 3 and 4 respectively.
