@@ -39,15 +39,13 @@ swru_patch_version="$(echo $swru_version | cut -f3 -d.)"
 # Limits and things
 update_apt_limit=5	# The number of times to try to update all apt packages
 
-### Kick off!
-if [[ $(id -u) != 0 ]]; then
-	echo -e "This script needs to be run as root."
-	exit 1
-fi
 
 ### Functions ###
+logger_cleanup () {
+	exec 1>&3 3>&-	# Restore stdout and close fd 3
+	exec 2>&4 4>&-	# Restore stderr and close fd 4
+}
 
-# Works.
 update_self () {
 	tmpfile=$(mktemp /tmp/swru-updater.bash.XXXXXX)
 
@@ -349,12 +347,11 @@ update_release () {
 }
 
 ### Let's get ready to rumble! ###
+if [[ $(id -u) != 0 ]]; then
+	echo -e "This script needs to be run as root."
+	exit 1
+fi
 
-# New territory for me
-logger_cleanup () {
-	exec 1>&3 3>&-	# Restore stdout and close fd 3
-	exec 2>&4 4>&-	# Restore stderr and close fd 4
-}
 
 # Log everything
 exec 3>&1 4>&2		# Store stdout and stderr to fd 3 and 4 respectively.
