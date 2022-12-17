@@ -12,6 +12,14 @@
 # Thoughts / ideas and things:
 #
 # * We can make this take arguments to do a specific action above
+# * Should we do an autoremove before dist-upgrade because less stuff to
+#   update and less flash churn? There are a lot of dangling packages
+#   though.
+# * Why is docker installed? In order to actually be safe we can't make
+#   this non-interactive or well we can exit out and let the user know
+#   they need to put their "house" in order and stop docker prior to
+#   proceeding.
+# * Using apt-mark hold for chromium
 
 set -e
 
@@ -35,9 +43,14 @@ swru_version="$(< /etc/switchroot_version.conf)"
 swru_major_version="$(echo $swru_version | cut -f1 -d.)"
 swru_minor_version="$(echo $swru_version | cut -f2 -d.)"
 swru_patch_version="$(echo $swru_version | cut -f3 -d.)"
+lsb_release=$(lsb_release -s -r)
+lsb_codename=$(lsb_release -s -c)
 
 # Limits and things
 update_apt_limit=5	# The number of times to try to update all apt packages
+
+# It kinda isn't but it might be so I'll leave this here to mull over.
+# export DEBIAN_FRONTEND=noninteractive
 
 ### Functions ###
 logger_cleanup () {
@@ -250,12 +263,68 @@ update_swru () {
 	fi
 }
 
+# pre work to be done to prepare for the release specified in the argument.
+# Meaning if the argument is focal, you're for the release specified by
+pre_dru () {
+	# Due to how docker containers can be managed aside from killing
+	# anything and everything and chmod'ing docker a-x, I'm going to
+	# leave it to the user.
+	docker_cmd=$(which docker)
+
+	if [ -x "$docker_cmd" ]; then
+		running=$(docker ps -q | wc -l)
+		if [ $running -ne 0 ]; then
+			cat <<-HEREDOC
+				There are docker containers currently running. This script will now exit as it
+				is up to you, the user, to stop them.
+			HEREDOC
+			exit 1
+		fi
+	fi
+
+	echo Starting pre do-release-upgrade work.
+
+	case "$lsb_codename" in
+		# bionic -> focal pre-work
+		bionic)
+			# dru will barf if docker is running.
+			systemctl is-active docker > /dev/null 2>&1
+			if [ $? -eq 0 ]; then
+				systemctl stop docker
+			fi
+
+			# Thanks Shuttleworth! TL;DR we can't hold a package and let it's
+			# dependencies get updated. So ... I'm just going to remove chromium.
+			# We will ensure installing it post upgrade.
+			#
+			# Also I thought Ubuntu did away with docker.io and told people to just
+			# get docker-ce *shrug*
+			# apt-mark hold \
+			# 	chromium-browser \
+			# 	chromium-browser-l10n \
+			# 	chromium-codecs-ffmpeg-extra
+
+			# To prevent any larger fallout from removing chromium (i.e. desktop,
+			# GUI meta-packages), I'm going to do an autoremove first, then remove
+			# chromium.
+			apt-get -y autoremove
+			apt-get -y remove chromium-browser chromium-browser-l10n chromium-codecs-ffmpeg-extra
+			;;
+		*)
+			echo No pre-work for $1.
+			;;
+	esac
+
+	echo Finishing pre do-release-upgrade work.
+
+	return
+}
+
 # Basic do-release-upgrader. Personally I've run into issues where 3rd party
 # repos need some TLC. It either gets disabled or the "sed" wrecks them. We
 # do have switchroot but that's unstable - let's see how it goes/blows.
 dru () {
 	# Using version numbers for a calmer future.
-	release_version=$(lsb_release -s -r)
 	echo -e "Enabling release upgrade"
 	sed -i 's/Prompt=never/Prompt=lts/g' /etc/update-manager/release-upgrades || true
 
@@ -269,9 +338,9 @@ dru () {
 
 	# Doing a simple check here. We can put in extra checks as we discover
 	# work that may need to be done.
-	post_upgrade_release_version=$(lsb_release -s -r)
+	lsb_release_now=$(lsb_release -s -r)
 
-	if [ "x$post_upgrade_release_version" = "x$(echo $release_version + 2 | bc -l)" ]; then
+	if [ "x$lsb_release_now" = "x$(echo $lsb_release + 2 | bc -l)" ]; then
 		echo Upgrade has succeeded.
 		echo -e "Disabling upgrade prompt"
 		sed -i 's/Prompt=lts/Prompt=never/g' /etc/update-manager/release-upgrades
@@ -284,53 +353,80 @@ dru () {
 }
 
 # Distro specific post upgrade stuff.
-update_2_focal () {
-	# Temporarily use testing repo
-	wget -qO - https://jetson.repo.azka.li/ubuntu/pubkey | apt-key add -
-	add-apt-repository 'deb https://jetson.repo.azka.li/ubuntu focal main'
+post_dru () {
+	lsb_codename_now=$(lsb_release -s -c)
 
-	# I'm not 100% sure what the intention was here. reinstall requires
-	# install but then some of the packages in the second line were/are
-	# already installed. I'm just going to right the reinstall install
-	# bit and hope for the best. Perhaps a confold confdef would be in
-	# good order here.
-	apt-get -y --reinstall install appstream libappstream*
-	apt-get -y install unity-lens-applications unity-lens-files libblockdev-mdraid2 switch-alsa-ucm2
+	case "$lsb_codename_now" in
+		focal)
+			# Temporarily use testing repo
+			# Should we get this "right" for Jammy / 22.04 as the new method
+			# frowns upon apt-key methods or scanning an entire dir and instead
+			# wants the repo definition to specify the path to its signing key?
+			wget -qO - https://jetson.repo.azka.li/ubuntu/pubkey | apt-key add -
+			add-apt-repository 'deb https://jetson.repo.azka.li/ubuntu focal main'
 
-	# We could just call update_apt but if we find there are updates
-	# people can just run this script here again.
-	#apt-get -o Dpkg::Options::="--force-overwrite" -y dist-upgrade
-	#apt-get -f -y -o Dpkg::Options::="--force-overwrite" install
+			# I'm not 100% sure what the intention was here. reinstall requires
+			# install but then some of the packages in the second line were/are
+			# already installed. I'm just going to right the reinstall install
+			# bit and hope for the best. Perhaps a confold confdef would be in
+			# good order here.
+			apt-get -y --reinstall install \
+				appstream \
+				libappstream*
+			apt-get -y install \
+				unity-lens-applications \
+				unity-lens-files \
+				libblockdev-mdraid2 \
+				switch-l4t-configs
+				# switch-alsa-ucm2 - commetning out and adding switch-l4t per azkali
 
-	# echo -e "Restoring gdm3 config"
-	# cp /etc/gdm3/custom.conf.bak /etc/gdm3/custom.conf
+			# We could just call update_apt but if we find there are updates
+			# people can just run this script here again.
+			#apt-get -o Dpkg::Options::="--force-overwrite" -y dist-upgrade
+			#apt-get -f -y -o Dpkg::Options::="--force-overwrite" install
 
-	# Restore old Xorg conf
-	#cp /etc/X11/xorg.conf.dist-upgrade-* /etc/X11/xorg.conf
-	#rm /etc/X11/xorg.conf.dist-upgrade-*
+			# echo -e "Restoring gdm3 config"
+			# cp /etc/gdm3/custom.conf.bak /etc/gdm3/custom.conf
 
-	echo -e "Fixing upower"
-	mkdir -p /etc/systemd/system/upower.service.d/
-	cat <<-HEREDOC > /etc/systemd/system/upower.service.d/override.conf
-		[Service]
-		PrivateUsers=no
-		RestrictNamespaces=no
-	HEREDOC
+			# Restore old Xorg conf
+			#cp /etc/X11/xorg.conf.dist-upgrade-* /etc/X11/xorg.conf
+			#rm /etc/X11/xorg.conf.dist-upgrade-*
 
-	systemctl daemon-reload && systemctl restart upower
+			echo -e "Fixing upower"
+			mkdir -p /etc/systemd/system/upower.service.d/
+			cat <<-HEREDOC > /etc/systemd/system/upower.service.d/override.conf
+				[Service]
+				PrivateUsers=no
+				RestrictNamespaces=no
+			HEREDOC
+	
+			systemctl daemon-reload && systemctl restart upower
+			;;
+		*)
+			echo "No post do-release-upgrade work for ${1}."
+			;;
+	esac
+
+	echo FINISH Post do-release-upgrade work
+	return
 }
 
+# This runs pre_dru, dru, and post_dru. dru being "do-release-upgrade".
 update_release () {
-	codename=$(lsb_release -s -c)
-
 	### Omitting - this file is a conf file, should not be overwritten
-	#   if it has modifications which it does.
+	#   with our dpkg options if it has modifications which it does.
 	# echo -e "Backing up gdm3 config"
 	# cp /etc/gdm3/custom.conf /etc/gdm3/custom.conf.bak
 
-	case $codename in
+	case "$lsb_codename" in
+		# bionic -> focal
 		bionic)
-			dru && update_2_focal
+			# Need to dblchk w/ CTCaer, I thought I needed to deploy 342 preview prior to update
+			# but as it's kernel-y goodness it makes sense for it to be done post. However as
+			# switch root updates are outside of apt updates and the kernel is held/pinned, I
+			# think it's probably safe to have it prior to a release upgrade and after a
+			# successful release upgrade
+			pre_dru && dru && post_dru
 			;;
 		*)
 			echo We are not ready to perform a release upgrade from $codename
@@ -373,6 +469,8 @@ update_apt
 # 4. Check if there are any swru updates and perform them. update_swru
 update_swru
 # 5. If we get here we do a release upgrade. update_release
+#    Technically: pre_dru RELEASE_NAME, dru, post_dru RELEASE_NAME.
+#    dru being do-release-upgrade.
 update_release
 
 ### azkali says -
